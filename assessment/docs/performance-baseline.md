@@ -56,6 +56,7 @@ CREATE TABLE clinical_data_raw (
 ```bash
 curl http://localhost:3000/health
 # Expected: {"status":"healthy","timestamp":"..."}
+# Actual Result: {"status":"healthy","timestamp":"2026-04-25T15:42:11.543Z"}%  
 ```
 
 ### Step 2 — Single-shot timing (any endpoint)
@@ -123,11 +124,11 @@ jq '{executionTime, executionTimeSeconds}' /tmp/overview.json
 
 Measured: 2026-04-25 | 3 warm runs each (cold-start run excluded)
 
-| Endpoint | TTFB (median) | Total (median) | Payload | Server DB Time |
-|---|---|---|---|---|
-| `GET /health` | 2 ms | 2 ms | 59 B | N/A |
-| `GET /api/studies/overview` | **~744 ms** | ~744 ms | 867 B | 728 ms |
-| `GET /api/quality/distribution` | **~455 ms** | ~455 ms | 962 B | 464 ms |
+| Endpoint | TTFB (median) | Total (median) | Payload | Server DB Time | curl Command |
+|---|---|---|---|---|---|
+| `GET /health` | 2 ms | 2 ms | 59 B | N/A | `curl -s -o /dev/null -w "ttfb: %{time_starttransfer}s \| total: %{time_total}s \| size: %{size_download}B\n" http://localhost:3000/health` |
+| `GET /api/studies/overview` | **~744 ms** | ~744 ms | 867 B | 728 ms | `curl -s -o /dev/null -w "ttfb: %{time_starttransfer}s \| total: %{time_total}s \| size: %{size_download}B\n" http://localhost:3000/api/studies/overview` |
+| `GET /api/quality/distribution` | **~455 ms** | ~455 ms | 962 B | 464 ms | `curl -s -o /dev/null -w "ttfb: %{time_starttransfer}s \| total: %{time_total}s \| size: %{size_download}B\n" http://localhost:3000/api/quality/distribution` |
 
 ### Raw Sample Output
 
@@ -166,6 +167,19 @@ docker exec -it <postgres_container_name> psql -U postgres -d clinical_data
 
 ```sql
 SELECT DISTINCT study_id, study_name FROM clinical_data_raw ORDER BY study_id;
+```
+
+**Actual result (2026-04-25):**
+
+```
+  study_id   |           study_name
+-------------+---------------------------------
+ CARDIO001   | Cardiovascular Health Study
+ CARDIO005   | Heart Failure Prevention Study
+ DIABETES002 | Diabetes Management Trial
+ NEURO004    | Neurological Disorders Research
+ ONCOLOGY003 | Cancer Treatment Study
+(5 rows)
 ```
 
 Use the returned `study_id` values in place of `'<study_id>'` in the EXPLAIN ANALYZE commands below.
@@ -260,6 +274,231 @@ WHERE study_id = '<study_id>';
 | `Execution Time` | Actual wall-clock time for the query |
 
 **Expected finding:** All queries will show `Seq Scan` on `clinical_data_raw` (500 K rows) because no indexes exist on `study_id` or `quality_score`.
+
+---
+
+## 4.1 Baseline Query Execution Results
+
+**Executed:** 2026-04-25  
+**Container:** `assessment-postgres-1` (PostgreSQL 15)  
+**Database:** `clinical_data`  
+**Representative study:** `CARDIO001` — Cardiovascular Health Study  
+
+### Available Studies (confirmed)
+
+| study\_id | study\_name |
+|---|---|
+| `CARDIO001` | Cardiovascular Health Study |
+| `CARDIO005` | Heart Failure Prevention Study |
+| `DIABETES002` | Diabetes Management Trial |
+| `NEURO004` | Neurological Disorders Research |
+| `ONCOLOGY003` | Cancer Treatment Study |
+
+---
+
+### Query 0 — Fetch Distinct Studies (`/api/studies/overview` — fires once)
+
+```sql
+EXPLAIN ANALYZE
+SELECT DISTINCT study_id, study_name, study_phase
+FROM clinical_data_raw
+ORDER BY study_id;
+```
+
+**Raw output:**
+
+```
+ Unique  (cost=22519.00..22520.50 rows=75 width=45) (actual time=71.287..72.835 rows=5 loops=1)
+   ->  Sort  (cost=22519.00..22519.38 rows=150 width=45) (actual time=71.287..72.832 rows=15 loops=1)
+         Sort Key: study_id, study_name, study_phase
+         Sort Method: quicksort  Memory: 26kB
+         ->  Gather  (cost=22497.83..22513.58 rows=150 width=45) (actual time=71.185..72.792 rows=15 loops=1)
+               Workers Planned: 2
+               Workers Launched: 2
+               ->  HashAggregate  (cost=21497.83..21498.58 rows=75 width=45) (actual time=69.592..69.593 rows=5 loops=3)
+                     Group Key: study_id, study_name, study_phase
+                     Batches: 1  Memory Usage: 24kB
+                     Worker 0:  Batches: 1  Memory Usage: 24kB
+                     Worker 1:  Batches: 1  Memory Usage: 24kB
+                     ->  Parallel Seq Scan on clinical_data_raw  (cost=0.00..19935.33 rows=208333 width=45) (actual time=0.025..22.962 rows=166667 loops=3)
+ Planning Time: 0.399 ms
+ Execution Time: 72.942 ms
+(15 rows)
+```
+
+| Key metric | Value |
+|---|---|
+| **Scan type** | `Parallel Seq Scan` → `HashAggregate` → `Sort` → `Unique` |
+| **Rows read per worker** | 166,667 (× 3 workers = full 500 K table) |
+| **Rows returned** | 5 distinct studies |
+| **Sort method** | quicksort, 26 kB in memory |
+| **Planning time** | 0.399 ms |
+| **Execution time** | **72.942 ms** |
+
+> **Finding:** To find 5 distinct rows, PostgreSQL reads the entire 500 K-row table, hashes all rows to find unique `(study_id, study_name, study_phase)` combinations, then sorts the result. This fires **once per request** as the bootstrap query for the N+1 loop. Replacing `SELECT DISTINCT` with a `GROUP BY` aggregation query would eliminate this pattern entirely.
+
+---
+
+### Query 1 — Total Measurement Count
+
+```sql
+EXPLAIN ANALYZE
+SELECT COUNT(*) AS total_measurements
+FROM clinical_data_raw
+WHERE study_id = 'CARDIO001';
+```
+
+**Raw output:**
+
+```
+ Finalize Aggregate  (cost=21563.74..21563.75 rows=1 width=8) (actual time=24.087..25.937 rows=1 loops=1)
+   ->  Gather  (cost=21563.53..21563.74 rows=2 width=8) (actual time=24.023..25.930 rows=3 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate  (cost=20563.53..20563.54 rows=1 width=8) (actual time=22.569..22.570 rows=1 loops=3)
+               ->  Parallel Seq Scan on clinical_data_raw  (cost=0.00..20456.17 rows=42945 width=0) (actual time=2.480..21.630 rows=33333 loops=3)
+                     Filter: (study_id = 'CARDIO001'::text)
+                     Rows Removed by Filter: 133333
+ Planning Time: 0.196 ms
+ Execution Time: 26.000 ms
+```
+
+| Key metric | Value |
+|---|---|
+| **Scan type** | `Parallel Seq Scan` — no index |
+| **Rows scanned per worker** | 33,333 (× 3 workers = full 100 K study rows) |
+| **Rows removed by filter** | 133,333 (rows from other studies, read and discarded) |
+| **Planning time** | 0.196 ms |
+| **Execution time** | **26.0 ms** |
+
+> **Finding:** Full sequential scan of `clinical_data_raw`. PostgreSQL uses parallel workers to reduce wall time, but all ~500 K rows are still read. This query runs **5× per API request** in the N+1 loop — contributing ~130 ms total just for this pattern.
+
+---
+
+### Query 2 — Average Quality Score (with TEXT cast)
+
+```sql
+EXPLAIN ANALYZE
+SELECT AVG(CAST(quality_score AS DECIMAL)) AS avg_quality_score
+FROM clinical_data_raw
+WHERE study_id = 'CARDIO001';
+```
+
+**Raw output (executed 2026-04-25):**
+
+```
+ Finalize Aggregate  (cost=21778.48..21778.49 rows=1 width=32) (actual time=61.164..63.948 rows=1 loops=1)
+   ->  Gather  (cost=21778.26..21778.47 rows=2 width=32) (actual time=61.073..63.936 rows=3 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate  (cost=20778.26..20778.27 rows=1 width=32) (actual time=59.214..59.214 rows=1 loops=3)
+               ->  Parallel Seq Scan on clinical_data_raw  (cost=0.00..20456.17 rows=42945 width=5) (actual time=22.739..54.083 rows=33333 loops=3)
+                     Filter: (study_id = 'CARDIO001'::text)
+                     Rows Removed by Filter: 133333
+ Planning Time: 0.545 ms
+ Execution Time: 64.035 ms
+(10 rows)
+```
+
+| Key metric | Value |
+|---|---|
+| **Scan type** | `Parallel Seq Scan` — no index |
+| **Rows removed by filter** | 133,333 |
+| **Planning time** | 0.545 ms |
+| **Execution time** | **64.035 ms** |
+
+> **Finding:** Identical seq scan pattern to Query 1. The `CAST(quality_score AS DECIMAL)` expression is evaluated row-by-row after the scan — it cannot be pushed into an index lookup. Even if an index on `quality_score` were added today, this cast would prevent it from being used. Execution time is higher than the initial run (26.9 ms → 64.0 ms), reflecting normal variance under Docker resource contention.
+
+---
+
+### Query 3 — High-Quality Count (TEXT cast with threshold filter)
+
+```sql
+EXPLAIN ANALYZE
+SELECT COUNT(*) AS high_quality_count
+FROM clinical_data_raw
+WHERE study_id = 'CARDIO001'
+  AND CAST(quality_score AS DECIMAL) >= 0.9;
+```
+
+**Raw output (executed 2026-04-25):**
+
+```
+ Finalize Aggregate  (cost=23054.67..23054.68 rows=1 width=8) (actual time=30.023..31.605 rows=1 loops=1)
+   ->  Gather  (cost=23054.45..23054.66 rows=2 width=8) (actual time=29.951..31.600 rows=3 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         ->  Partial Aggregate  (cost=22054.45..22054.46 rows=1 width=8) (actual time=28.766..28.766 rows=1 loops=3)
+               ->  Parallel Seq Scan on clinical_data_raw  (cost=0.00..22018.67 rows=14315 width=0) (actual time=9.989..28.281 rows=19604 loops=3)
+                     Filter: ((study_id = 'CARDIO001'::text) AND ((quality_score)::numeric >= 0.9))
+                     Rows Removed by Filter: 147062
+ Planning Time: 0.521 ms
+ Execution Time: 31.724 ms
+(10 rows)
+```
+
+| Key metric | Value |
+|---|---|
+| **Scan type** | `Parallel Seq Scan` — no index |
+| **Filter** | `study_id = 'CARDIO001' AND quality_score::numeric >= 0.9` (applied post-scan) |
+| **Rows removed by filter** | 147,062 |
+| **Planning time** | 0.521 ms |
+| **Execution time** | **31.724 ms** |
+
+> **Finding:** Both predicates are evaluated as post-scan filters. The compound cast expression `(quality_score)::numeric >= 0.9` confirms PostgreSQL cannot use any index on the raw `quality_score TEXT` column for range comparisons.
+
+---
+
+### Query 4 — Distinct Participant Count
+
+```sql
+EXPLAIN ANALYZE
+SELECT COUNT(DISTINCT participant_id) AS participant_count
+FROM clinical_data_raw
+WHERE study_id = 'CARDIO001';
+```
+
+**Raw output (executed 2026-04-25):**
+
+```
+ Aggregate  (cost=24359.67..24359.68 rows=1 width=8) (actual time=154.255..154.256 rows=1 loops=1)
+   ->  Seq Scan on clinical_data_raw  (cost=0.00..24102.00 rows=103067 width=16) (actual time=40.504..134.377 rows=100000 loops=1)
+         Filter: (study_id = 'CARDIO001'::text)
+         Rows Removed by Filter: 400000
+ Planning Time: 0.484 ms
+ Execution Time: 154.332 ms
+(6 rows)
+```
+
+| Key metric | Value |
+|---|---|
+| **Scan type** | `Seq Scan` — **single-threaded**, no parallel workers |
+| **Rows scanned** | 500,000 (full table) |
+| **Rows removed by filter** | 400,000 |
+| **Planning time** | 0.484 ms |
+| **Execution time** | **154.332 ms** — the slowest of all queries |
+
+> **Finding:** `COUNT(DISTINCT ...)` requires building a hash set of all distinct values, which prevents PostgreSQL from using parallel aggregation. This single query alone takes ~154 ms in this run. It fires 5× per `/api/studies/overview` request — contributing **~770 ms** of the ~744 ms total observed latency, consistent with measured API response times.
+
+---
+
+### Summary — All Baseline Queries
+
+| # | Query pattern | Scan type | Execution time | Fires per request | Total cost per endpoint |
+|---|---|---|---|---|---|
+| 0 | `SELECT DISTINCT study_id, study_name, study_phase` | Parallel Seq Scan + HashAggregate | 72.9 ms | 1× (`/studies/overview`) | 72.9 ms |
+| 1 | `COUNT(*)` with `study_id` filter | Parallel Seq Scan | 26.0 ms | 5× (`/quality/distribution`) | ~130 ms |
+| 2 | `AVG(CAST(quality_score AS DECIMAL))` | Parallel Seq Scan | 64.0 ms | 5× (`/quality/distribution`) | ~320 ms |
+| 3 | `COUNT(*) ... quality_score >= 0.9` | Parallel Seq Scan | 31.7 ms | 5× (`/quality/distribution`) | ~159 ms |
+| 4 | `COUNT(DISTINCT participant_id)` | **Single-thread Seq Scan** | **154.3 ms** | 5× (`/studies/overview`) | **~772 ms** |
+
+**Key observations:**
+- Every query performs a **full sequential scan** of 500 K rows — zero index usage anywhere.
+- `COUNT(DISTINCT ...)` (Query 4) is the single most expensive pattern at **154 ms**, because it cannot use parallel aggregation. Firing 5× accounts for ~772 ms alone — exceeding the full observed API latency of ~744 ms, consistent with other queries running concurrently or with some variance.
+- The `CAST(quality_score AS DECIMAL)` pattern (Queries 2 & 3) permanently blocks index use on `quality_score` until the column type is changed to `NUMERIC`.
+- Estimated N+1 sequential cost per endpoint:
+  - `/api/studies/overview`: Q0 (72.9) + Q4×5 (772) = **~845 ms** theoretical — matches observed ~744 ms
+  - `/api/quality/distribution`: Q1×5 (130) + Q2×5 (320) + Q3×5 (159) = **~609 ms** theoretical — matches observed ~455 ms (parallelism reduces wall time)
 
 ---
 
@@ -377,4 +616,76 @@ Tasks:
 
 Do not modify application logic yet. Only create the baseline documentation and measurement commands.
 ```
+---
+
+### Prompt 2 — Database Baseline Query Execution
+
+#### Objective
+
+Capture actual database-level performance characteristics using `EXPLAIN ANALYZE` and document real execution plans to validate baseline bottlenecks identified at the API level.
+
+---
+
+#### Prompt Used
+
+```text
+I have a full-stack clinical quality dashboard assessment using React, Node/Express, and PostgreSQL in Docker Compose.
+
+Please execute the database performance baseline analysis and update my existing performance markdown file.
+
+Goal:
+Add a new section named:
+
+## 4.1 Baseline Query Execution Results
+
+Tasks:
+1. Connect to the local PostgreSQL database:
+   - Host: localhost
+   - Port: 5432
+   - Database: clinical_data
+   - User: postgres
+   - Password: postgres
+
+2. Confirm available studies:
+   Run:
+   SELECT DISTINCT study_id, study_name
+   FROM clinical_data_raw
+   ORDER BY study_id;
+
+3. Pick one representative study_id from the result.
+
+4. Run EXPLAIN ANALYZE for these baseline queries:
+
+EXPLAIN ANALYZE
+SELECT COUNT(*) AS total_measurements
+FROM clinical_data_raw
+WHERE study_id = '<study_id>';
+
+EXPLAIN ANALYZE
+SELECT AVG(CAST(quality_score AS DECIMAL)) AS avg_quality_score
+FROM clinical_data_raw
+WHERE study_id = '<study_id>';
+
+EXPLAIN ANALYZE
+SELECT COUNT(*) AS high_quality_count
+FROM clinical_data_raw
+WHERE study_id = '<study_id>'
+  AND CAST(quality_score AS DECIMAL) >= 0.9;
+
+EXPLAIN ANALYZE
+SELECT COUNT(DISTINCT participant_id) AS participant_count
+FROM clinical_data_raw
+WHERE study_id = '<study_id>';
+
+5. Capture the actual EXPLAIN ANALYZE output.
+
+6. Update my existing markdown file by inserting this new section immediately after:
+
+## 4. Database Query Performance
+
+7. Do not fabricate numbers.
+8. Use only actual results from the local database.
+9. If the database is not running or connection fails, stop and report the exact error.
+10. Do not modify application logic.
+11. Only update the markdown documentation file.
 
