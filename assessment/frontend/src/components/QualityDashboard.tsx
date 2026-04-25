@@ -86,6 +86,10 @@ function QualityDashboard() {
     );
   }
 
+  const formatScore = (score: number) => `${(score * 100).toFixed(1)}%`;
+  const formatCount = (count: number, total: number) =>
+    `${count.toLocaleString()} (${((count / total) * 100).toFixed(1)}%)`;
+
   const chartData = data.data.map(item => ({
     name: item.study_name.length > 30 ? item.study_name.substring(0, 30) + '...' : item.study_name,
     'High Quality (≥0.9)': item.high_quality_count,
@@ -104,13 +108,19 @@ function QualityDashboard() {
         </div>
 
         <div className="mb-6">
-          <ResponsiveContainer width="100%" height={400}>
-            <BarChart data={chartData}>
+          <ResponsiveContainer width="100%" height={500}>
+            <BarChart data={chartData} margin={{ top: 10, right: 30, left: 20, bottom: 160 }}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" angle={-45} textAnchor="end" height={120} />
+              <XAxis
+                dataKey="name"
+                angle={-45}
+                textAnchor="end"
+                interval={0}
+                tick={{ fontSize: 12 }}
+              />
               <YAxis />
               <Tooltip />
-              <Legend />
+              <Legend verticalAlign="top" />
               <Bar dataKey="High Quality (≥0.9)" fill="#10b981" />
               <Bar dataKey="Low Quality (<0.8)" fill="#ef4444" />
             </BarChart>
@@ -132,11 +142,11 @@ function QualityDashboard() {
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Avg Quality
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    High Quality
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider" title="Measurements with quality score ≥ 0.9">
+                    High Quality (≥90%)
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Low Quality
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider" title="Measurements with quality score < 0.8">
+                    Low Quality (&lt;80%)
                   </th>
                 </tr>
               </thead>
@@ -160,14 +170,14 @@ function QualityDashboard() {
                           ? 'text-yellow-600'
                           : 'text-red-600'
                       }`}>
-                        {parseFloat(item.avg_quality_score.toString()).toFixed(4)}
+                        {formatScore(parseFloat(item.avg_quality_score.toString()))}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-900">
-                      {item.high_quality_count}
+                      {formatCount(item.high_quality_count, item.total_measurements)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm text-gray-900">
-                      {item.low_quality_count}
+                      {formatCount(item.low_quality_count, item.total_measurements)}
                     </td>
                   </tr>
                 ))}

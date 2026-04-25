@@ -24,6 +24,18 @@ services:
       postgres:
         condition: service_healthy
 
+  migrate:
+    image: public.ecr.aws/docker/library/postgres:15
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./database/migrations/db_tuneup.sql:/migrations/db_tuneup.sql
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    command: psql -h postgres -U postgres -d clinical_data -f /migrations/db_tuneup.sql
+    restart: "no"
+
   api:
     build: ./api
     ports:
