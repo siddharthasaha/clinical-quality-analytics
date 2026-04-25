@@ -24,19 +24,3 @@ CREATE TABLE IF NOT EXISTS clinical_data_raw (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Indexes
-CREATE INDEX IF NOT EXISTS idx_clinical_study_id
-    ON clinical_data_raw (study_id);
-
-CREATE INDEX IF NOT EXISTS idx_clinical_study_quality
-    ON clinical_data_raw (study_id, quality_score);
-
-CREATE INDEX IF NOT EXISTS idx_clinical_study_participant
-    ON clinical_data_raw (study_id, participant_id);
-
-CREATE INDEX IF NOT EXISTS idx_clinical_study_site
-    ON clinical_data_raw (study_id, site_id);
-
--- Convert quality_score to NUMERIC if it was previously created as TEXT
-ALTER TABLE clinical_data_raw
-    ALTER COLUMN quality_score TYPE NUMERIC USING quality_score::NUMERIC;
