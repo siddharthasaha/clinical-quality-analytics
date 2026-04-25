@@ -119,7 +119,7 @@ ORDER BY study_id;
 - Evaluated row-by-row post-scan
 - Prevents any index on `quality_score` from being used
 
-**Option B — Change column type (preferred, requires migration):**
+**Option  — Change column type (preferred, requires migration):**
 
 ```sql
 -- Add to database/bootstrap.sql
