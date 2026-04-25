@@ -166,7 +166,7 @@ docker exec -it <postgres_container_name> psql -U postgres -d clinical_data
 ### Step 1 — Confirm study IDs in the database
 
 ```sql
-SELECT DISTINCT study_id, study_name FROM clinical_data_raw ORDER BY study_id;
+SELECT study_id, study_name FROM clinical_data_raw GROUP BY study_id, study_name ORDER BY study_id;
 ```
 
 **Actual result (2026-04-25):**
@@ -191,13 +191,7 @@ Use the returned `study_id` values in place of `'<study_id>'` in the EXPLAIN ANA
 This endpoint fires **21 sequential queries** (1 + 5 studies × 4 queries each). Run EXPLAIN ANALYZE on each query pattern:
 
 ```sql
--- Query 1: fetch distinct studies (fires once)
-EXPLAIN ANALYZE
-SELECT DISTINCT study_id, study_name
-FROM clinical_data_raw
-ORDER BY study_id;
-
--- Query 2: total measurement count per study (fires 5×)
+-- Query 1: total measurement count per study (fires 5×)
 EXPLAIN ANALYZE
 SELECT COUNT(*) AS total_measurements
 FROM clinical_data_raw
@@ -234,13 +228,8 @@ WHERE study_id = '<study_id>'
 This endpoint fires **16 sequential queries** (1 + 5 studies × 3 queries each):
 
 ```sql
--- Query 1: fetch distinct studies (fires once)
-EXPLAIN ANALYZE
-SELECT DISTINCT study_id, study_name, study_phase
-FROM clinical_data_raw
-ORDER BY study_id;
+-- Query 1: distinct participant count per study (fires 5×)
 
--- Query 2: distinct participant count per study (fires 5×)
 EXPLAIN ANALYZE
 SELECT COUNT(DISTINCT participant_id) AS participant_count
 FROM clinical_data_raw
@@ -293,49 +282,6 @@ WHERE study_id = '<study_id>';
 | `DIABETES002` | Diabetes Management Trial |
 | `NEURO004` | Neurological Disorders Research |
 | `ONCOLOGY003` | Cancer Treatment Study |
-
----
-
-### Query 0 — Fetch Distinct Studies (`/api/studies/overview` — fires once)
-
-```sql
-EXPLAIN ANALYZE
-SELECT DISTINCT study_id, study_name, study_phase
-FROM clinical_data_raw
-ORDER BY study_id;
-```
-
-**Raw output:**
-
-```
- Unique  (cost=22519.00..22520.50 rows=75 width=45) (actual time=71.287..72.835 rows=5 loops=1)
-   ->  Sort  (cost=22519.00..22519.38 rows=150 width=45) (actual time=71.287..72.832 rows=15 loops=1)
-         Sort Key: study_id, study_name, study_phase
-         Sort Method: quicksort  Memory: 26kB
-         ->  Gather  (cost=22497.83..22513.58 rows=150 width=45) (actual time=71.185..72.792 rows=15 loops=1)
-               Workers Planned: 2
-               Workers Launched: 2
-               ->  HashAggregate  (cost=21497.83..21498.58 rows=75 width=45) (actual time=69.592..69.593 rows=5 loops=3)
-                     Group Key: study_id, study_name, study_phase
-                     Batches: 1  Memory Usage: 24kB
-                     Worker 0:  Batches: 1  Memory Usage: 24kB
-                     Worker 1:  Batches: 1  Memory Usage: 24kB
-                     ->  Parallel Seq Scan on clinical_data_raw  (cost=0.00..19935.33 rows=208333 width=45) (actual time=0.025..22.962 rows=166667 loops=3)
- Planning Time: 0.399 ms
- Execution Time: 72.942 ms
-(15 rows)
-```
-
-| Key metric | Value |
-|---|---|
-| **Scan type** | `Parallel Seq Scan` → `HashAggregate` → `Sort` → `Unique` |
-| **Rows read per worker** | 166,667 (× 3 workers = full 500 K table) |
-| **Rows returned** | 5 distinct studies |
-| **Sort method** | quicksort, 26 kB in memory |
-| **Planning time** | 0.399 ms |
-| **Execution time** | **72.942 ms** |
-
-> **Finding:** To find 5 distinct rows, PostgreSQL reads the entire 500 K-row table, hashes all rows to find unique `(study_id, study_name, study_phase)` combinations, then sorts the result. This fires **once per request** as the bootstrap query for the N+1 loop. Replacing `SELECT DISTINCT` with a `GROUP BY` aggregation query would eliminate this pattern entirely.
 
 ---
 
@@ -486,7 +432,6 @@ WHERE study_id = 'CARDIO001';
 
 | # | Query pattern | Scan type | Execution time | Fires per request | Total cost per endpoint |
 |---|---|---|---|---|---|
-| 0 | `SELECT DISTINCT study_id, study_name, study_phase` | Parallel Seq Scan + HashAggregate | 72.9 ms | 1× (`/studies/overview`) | 72.9 ms |
 | 1 | `COUNT(*)` with `study_id` filter | Parallel Seq Scan | 26.0 ms | 5× (`/quality/distribution`) | ~130 ms |
 | 2 | `AVG(CAST(quality_score AS DECIMAL))` | Parallel Seq Scan | 64.0 ms | 5× (`/quality/distribution`) | ~320 ms |
 | 3 | `COUNT(*) ... quality_score >= 0.9` | Parallel Seq Scan | 31.7 ms | 5× (`/quality/distribution`) | ~159 ms |
@@ -578,7 +523,7 @@ No indexes exist on `study_id`, `quality_score`, `participant_id`, or `site_id`.
 
 > _To be completed after Task 1 implementation._
 
-- [ ] `database/migrations/001_add_indexes.sql` — indexes on `study_id`, composite on `(study_id, quality_score)`
+- [ ] Indexes added to `database/bootstrap.sql` — `study_id`, composite on `(study_id, quality_score)`
 - [ ] Queries collapsed — N+1 loops replaced with single `GROUP BY study_id` aggregation per endpoint
 - [ ] `quality_score` column type changed from `TEXT` to `NUMERIC` (optional but recommended)
 - [ ] Frontend — quality scores formatted to 1–2 decimal places with % labels
@@ -648,9 +593,7 @@ Tasks:
 
 2. Confirm available studies:
    Run:
-   SELECT DISTINCT study_id, study_name
-   FROM clinical_data_raw
-   ORDER BY study_id;
+   SELECT study_id, study_name FROM clinical_data_raw GROUP BY study_id, study_name ORDER BY study_id;
 
 3. Pick one representative study_id from the result.
 
