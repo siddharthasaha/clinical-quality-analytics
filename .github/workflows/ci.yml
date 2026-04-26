@@ -7,6 +7,10 @@ on:
   pull_request:
     branches:
       - '**'
+    types:
+      - opened        # PR created
+      - synchronize   # new commits pushed to the PR branch
+      - reopened      # closed PR re-opened
 
 jobs:
   test-api:

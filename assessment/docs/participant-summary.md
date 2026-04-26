@@ -66,6 +66,39 @@ If any test fails, the workflow step exits non-zero and the CI check fails.
 
 ---
 
+## Viewing CI Test Progress on GitHub
+
+### Viewing runs for a branch or commit
+
+1. Open the repository on GitHub.
+2. Click the **Actions** tab in the top navigation bar.
+3. In the left sidebar, select the **CI** workflow.
+4. All recent runs are listed. Each row shows the branch name, commit message, trigger (push or pull request), and status badge (queued / in progress / passed / failed).
+5. Click any run to open it, then click the **API Tests** job to expand the step-by-step log.
+
+### Viewing status on a Pull Request
+
+1. Open the pull request on GitHub.
+2. Scroll to the **Checks** section near the merge button.
+3. The **CI / API Tests** check is listed with its current status.
+4. Click **Details** next to the check to jump directly to the live log for that run.
+
+### Status badges at a glance
+
+| Badge colour | Meaning |
+|---|---|
+| Yellow / spinning | Workflow is queued or running |
+| Green checkmark | All tests passed |
+| Red ✕ | One or more tests failed — click Details to see which step failed and the full Jest output |
+
+### Re-running a failed workflow
+
+1. Open the failed run from the **Actions** tab.
+2. Click **Re-run all jobs** (top-right corner) to trigger the exact same commit again without pushing a new commit.
+3. Click **Re-run failed jobs** to re-run only the jobs that failed.
+
+---
+
 ### Modified Files
 
 #### `assessment/api/src/routes/index.ts` (+2)
