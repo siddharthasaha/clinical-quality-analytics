@@ -1,8 +1,17 @@
 # Participant Summary Feature — Implementation Summary
 
-## Summary
+---
 
-This change introduces a fully tested, production-ready participant summary feature with backend aggregation APIs, frontend visualization, and CI validation, enabling efficient cohort-level analysis.
+## Executive Summary
+
+This change delivers a full-stack participant analytics feature with:
+
+* Scalable backend aggregation APIs
+* Optimized query design (eliminates N+1 patterns)
+* Fully tested frontend using realistic API mocking (MSW)
+* CI pipeline ensuring reliability and regression prevention
+
+The implementation emphasizes **performance, testability, and maintainability**, and is designed to scale with increasing data volume.
 
 ---
 
@@ -12,7 +21,7 @@ This change introduces a fully tested, production-ready participant summary feat
 | - | ------------------------------------------------------------------------------------------------------ |
 | 1 | Add participant summary report with aggregated API, gender/site breakdowns, and shareable study routes |
 | 2 | Added exception handling                                                                               |
-| 3 | Added unit test for api under `api/src/routes/__tests__`                                               |
+| 3 | Added unit tests for API under `api/src/routes/__tests__`                                              |
 | 4 | Created frontend components                                                                            |
 | 5 | Added a GitHub Actions CI workflow to run tests on push                                                |
 
@@ -25,17 +34,18 @@ This change introduces a fully tested, production-ready participant summary feat
   * improve readability and maintainability
   * isolate performance hotspots
   * simplify debugging and testing
-* `Promise.all` ensures queries execute in parallel, avoiding added latency
+* Chosen over a monolithic query to improve maintainability without sacrificing latency (due to parallel execution)
+* `Promise.all` ensures queries execute in parallel
 * `DatabaseError` abstraction provides consistent error handling and observability
 
 ---
 
 ## Performance Considerations
 
-* Queries execute in parallel using `Promise.all`
-* Each query uses grouped aggregation, avoiding N+1 patterns
-* Queries are scoped by `study_id` when provided, reducing scanned data
-* Designed to work efficiently with indexes on:
+* Eliminates N+1 query patterns via grouped aggregation queries
+* Executes independent queries in parallel using `Promise.all`
+* Queries scoped by `study_id` to reduce scanned dataset size
+* Designed to leverage indexes on:
 
   * `(study_id)`
   * `(study_id, participant_id)`
@@ -51,26 +61,36 @@ This change introduces a fully tested, production-ready participant summary feat
 
 ---
 
-## Backend Changes
+# Backend Implementation
 
-### New — `assessment/api/src/routes/participants.routes.ts` (+267)
+## New — `assessment/api/src/routes/participants.routes.ts`
 
-Introduces a new Express route module for `GET /api/participants/summary` and `GET /api/participants/summary/:studyId`.
+Introduces new endpoints:
 
-* **`DatabaseError`** — wraps PostgreSQL errors with query context and preserves the original cause
-* **`validateStudyId`** — input validation (alphanumeric/hyphen/underscore, max 64 chars); returns 400 on invalid input
-* **Query helpers** — reusable `studyFilter` and `queryParams`
-* **Aggregation functions**
+* `GET /api/participants/summary`
+* `GET /api/participants/summary/:studyId`
 
-  * `getParticipantStats` — participant-level deduplication + aggregate metrics
-  * `getGenderBreakdown` — per-study gender distribution
-  * `getSiteDistribution` — per-study site distribution
-* **Route handler**
+### Key Components
 
-  * Executes queries in parallel using `Promise.all`
-  * Merges results into a unified response
-  * Returns array or single object based on input
-* **Error handling**
+* **DatabaseError**
+
+  * Wraps PostgreSQL errors with context
+* **validateStudyId**
+
+  * Input validation (alphanumeric, max 64 chars)
+* **Query Helpers**
+
+  * Shared filtering logic
+* **Aggregation Functions**
+
+  * `getParticipantStats`
+  * `getGenderBreakdown`
+  * `getSiteDistribution`
+* **Route Handler**
+
+  * Executes queries in parallel via `Promise.all`
+  * Merges results into unified response
+* **Error Handling**
 
   * 400 → validation errors
   * 503 → database failures
@@ -78,30 +98,34 @@ Introduces a new Express route module for `GET /api/participants/summary` and `G
 
 ---
 
-### Modified — `assessment/api/src/routes/index.ts`
+## Modified — `routes/index.ts`
 
-```typescript
+```ts
 import participantsRoutes from './participants.routes';
 router.use('/participants', participantsRoutes);
 ```
 
 ---
 
-## API Surface
+# API Design
 
-| Method | Path                                 | Description                     |
-| ------ | ------------------------------------ | ------------------------------- |
-| `GET`  | `/api/participants/summary`          | Returns all studies (array)     |
-| `GET`  | `/api/participants/summary/:studyId` | Returns a single study (object) |
+## Endpoints
+
+| Method | Path                                 | Description                   |
+| ------ | ------------------------------------ | ----------------------------- |
+| GET    | `/api/participants/summary`          | Returns all studies (array)   |
+| GET    | `/api/participants/summary/:studyId` | Returns single study (object) |
 
 ---
 
 ## API Design Note
 
-* Returns **array** for all studies
-* Returns **object** for single study
+The API returns:
 
-👉 This simplifies frontend consumption but introduces slight response shape inconsistency.
+* an **array** for all studies
+* a **single object** for a specific study
+
+This simplifies frontend usage for detail views while introducing a minor inconsistency in response shape.
 
 ---
 
@@ -120,7 +144,14 @@ router.use('/participants', participantsRoutes);
     "data_start_date": "ISO timestamp",
     "data_end_date": "ISO timestamp",
     "gender_breakdown": [{ "gender": "string", "count": 0 }],
-    "site_distribution": [{ "site_id": "string", "site_name": "string", "site_location": "string", "participant_count": 0 }]
+    "site_distribution": [
+      {
+        "site_id": "string",
+        "site_name": "string",
+        "site_location": "string",
+        "participant_count": 0
+      }
+    ]
   },
   "executionTime": "123ms",
   "executionTimeSeconds": 0.123
@@ -138,84 +169,123 @@ router.use('/participants', participantsRoutes);
 | 503    | Database failure        |
 | 500    | Unexpected server error |
 
-All responses return structured error messages.
+All errors return structured responses and are logged.
 
 ---
 
-## Frontend Changes
+# Frontend Implementation
 
-### New — `ParticipantSummary.tsx`
-
-A self-contained React component that renders participant summary data.
-
-### Frontend Performance Consideration
-
-* Data is fetched once and cached in component state
-* Study switching does not trigger additional API calls
-* Improves perceived responsiveness
+## Component — `ParticipantSummary.tsx`
 
 ### Features
 
 * Study selector dropdown
-* 8 summary cards (participants, age, measurements, etc.)
-* Gender breakdown pie chart (Recharts)
+* Summary cards (participants, age, measurements)
+* Gender breakdown chart
 * Site distribution table
 * Shareable URL with copy-to-clipboard
 
 ---
 
-## App Integration
+## Frontend Performance Strategy
 
-### Modified — `App.tsx`
-
-* Added `participants` page
-* Supports deep linking (`?page=participants&study=ID`)
-* Syncs URL state with navigation
-* Adds navigation menu item
+* Fetch-once model (no redundant API calls)
+* Cached data in component state
+* Study switching handled locally
 
 ---
 
-## Types
+# Testing Strategy
 
-New TypeScript interfaces:
+## Backend Testing
 
-* `ParticipantSummary`
-* `GenderBreakdown`
-* `SiteDistribution`
-* `ParticipantSummaryResponse`
+* Database calls mocked (`pool.query`)
+* Route-level integration tests
+* Covers:
 
----
-
-## Testing Strategy
-
-* Unit tests mock `pool.query` (no real DB dependency)
-* Route tests validate full request/response cycle
-* Edge cases covered:
-
-  * invalid input
+  * valid flows
+  * validation errors
   * empty results
-  * database errors
-* Ensures fast and deterministic test execution
+  * database failures
 
 ---
 
 ## Test Coverage
 
-41 tests across:
-
-* validation
-* helper functions
-* database queries
-* API endpoints
-* error handling
+* 41 backend tests
+* Covers validation, queries, API endpoints, error handling
 
 ---
 
-## CI Changes
+# Frontend Testing — Vitest Implementation
 
-### GitHub Actions Workflow
+## Stack
 
-Runs tests on every push and pull request.
+| Tool                  | Role                        |
+| --------------------- | --------------------------- |
+| Vitest                | Test runner (Vite-native)   |
+| React Testing Library | Component rendering         |
+| user-event            | User interaction simulation |
+| jest-dom              | DOM assertions              |
+| MSW                   | API mocking                 |
+| jsdom                 | Browser-like environment    |
+
+---
+
+## Architecture
+
+```text
+src/test/
+├── setup.ts
+├── handlers.ts
+├── server.ts
+└── __tests__/
+```
+
+---
+
+## Testing Philosophy
+
+* Test behavior, not implementation
+* Mock at system boundaries (network level via MSW)
+* Keep tests deterministic and fast
+* Fail loudly on missing mocks (`onUnhandledRequest: 'error'`)
+
+---
+
+## Why MSW
+
+MSW intercepts API calls at the network layer, enabling:
+
+* Realistic API simulation
+* Full fetch → render → interaction testing
+* Independence from implementation details
+
+This provides significantly higher confidence than mocking `fetch`.
+
+---
+
+## Coverage Areas
+
+* Component rendering
+* User interaction
+* Data display
+* Error states
+* Loading states
+
+---
+
+## Benefits
+
+* Fast execution (no network calls)
+* High confidence UI validation
+* Fully isolated test environment
+
+---
+
+# CI Integration
+
+## GitHub Actions
 
 ```text
 push / pull_request → npm ci → npm test
@@ -225,32 +295,35 @@ push / pull_request → npm ci → npm test
 
 ## CI Purpose
 
-Ensures automated validation of all changes, preventing regressions and maintaining code quality.
+Ensures every change is validated automatically, preventing regressions and maintaining consistent code quality across all branches.
 
 ---
 
-## How to View CI Runs
+# Final Impact
 
-1. Go to repository
-2. Click **Actions**
-3. Select workflow
-4. Inspect logs
-
----
-
-## Final Impact
-
-* Introduces a complete participant summary feature
-* Improves data accessibility and usability
-* Maintains high test coverage and reliability
-* Enables shareable insights via URL-based navigation
+* Full-stack feature delivered (API + UI + CI)
+* High test coverage across backend and frontend
+* Scalable, maintainable architecture
+* Production-ready design
 
 ---
 
-## Reviewer Notes
+## Key Strengths
 
-* Fully tested (unit + integration)
-* No database dependency in tests
+* Full-stack implementation (backend + frontend + CI)
+* Strong testing strategy (MSW + Vitest)
+* Performance-aware API design
 * Clean separation of concerns
-* Scalable aggregation approach
-* CI ensures ongoing quality
+* Developer-friendly architecture
+
+---
+
+##  Notes
+
+* Fully tested (backend + frontend)
+* No external dependencies in tests
+* Realistic API simulation
+* Clean, maintainable code structure
+
+---
+
